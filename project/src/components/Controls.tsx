@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, RotateCcw, Plus } from 'lucide-react';
+import { Play, Pause, RotateCcw, Plus, Clock3 } from 'lucide-react';
 import { TimerSubject } from '../utils/timeUtils';
 
 interface ControlsProps {
@@ -7,11 +7,12 @@ interface ControlsProps {
   onToggle: () => void;
   onReset: () => void;
   onNewSubject: () => void;
+  onSetTime: () => void;
 }
 
-export function Controls({ currentSubject, onToggle, onReset, onNewSubject }: ControlsProps) {
+export function Controls({ currentSubject, onToggle, onReset, onNewSubject, onSetTime }: ControlsProps) {
   return (
-    <div className="flex justify-center items-center gap-4 mt-8">
+    <div className="flex flex-wrap justify-center items-center gap-4 mt-8">
       <button
         onClick={onNewSubject}
         className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
@@ -32,6 +33,13 @@ export function Controls({ currentSubject, onToggle, onReset, onNewSubject }: Co
       >
         <RotateCcw size={20} />
         Reset
+      </button>
+      <button
+        onClick={onSetTime}
+        className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+      >
+        <Clock3 size={20} />
+        Set Time
       </button>
     </div>
   );

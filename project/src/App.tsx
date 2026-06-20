@@ -4,7 +4,18 @@ import { Controls } from './components/Controls';
 import { TimerInfo } from './components/TimerInfo';
 import { ThemeToggle } from './components/ThemeToggle';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
-import { TimerSubject } from './utils/timeUtils';
+import { TimerSubject, formatTime, parseManualTime } from './utils/timeUtils';
+
+type TimerSubjectRow = {
+  id: string;
+  name: string;
+  seconds: number;
+  is_running: boolean;
+};
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : 'Unknown error';
+}
 
 function App() {
   const [isDark, setIsDark] = useState(() => {
@@ -40,7 +51,7 @@ function App() {
         if (error) throw error;
 
         if (data && data.length > 0) {
-          const mapped = data.map((s: any) => ({
+          const mapped = (data as TimerSubjectRow[]).map((s) => ({
             id: s.id,
             name: s.name,
             seconds: s.seconds,
@@ -68,7 +79,7 @@ function App() {
 
                 if (insertError) throw insertError;
 
-                const mapped = inserted!.map((s: any) => ({
+                const mapped = (inserted as TimerSubjectRow[]).map((s) => ({
                   id: s.id,
                   name: s.name,
                   seconds: s.seconds,
@@ -80,7 +91,7 @@ function App() {
                 setLoading(false);
                 return;
               }
-            } catch (e) {
+            } catch {
               // Ignore parse errors, fall through to create default
             }
           }
@@ -102,8 +113,8 @@ function App() {
           setSubjects([defaultSubject]);
           setCurrentSubjectId(defaultSubject.id);
         }
-      } catch (err: any) {
-        setError(err.message);
+      } catch (err) {
+        setError(getErrorMessage(err));
       } finally {
         setLoading(false);
       }
@@ -212,6 +223,35 @@ function App() {
 
   const currentSubject = subjects.find(s => s.id === currentSubjectId) || subjects[0];
 
+  const handleSetTime = useCallback(async () => {
+    if (!currentSubject) return;
+
+    const input = prompt(
+      `Set elapsed time for "${currentSubject.name}". Use HH:MM:SS, MM:SS, or total seconds.`,
+      formatTime(currentSubject.seconds)
+    );
+
+    if (input === null) return;
+
+    const nextSeconds = parseManualTime(input);
+    if (nextSeconds === null) {
+      alert('Invalid time. Please use HH:MM:SS, MM:SS, or total seconds.');
+      return;
+    }
+
+    setSubjects(prev =>
+      prev.map(s =>
+        s.id === currentSubject.id ? { ...s, seconds: nextSeconds } : s
+      )
+    );
+
+    const { error } = await supabase
+      .from('timer_subjects')
+      .update({ seconds: nextSeconds })
+      .eq('id', currentSubject.id);
+    if (error) setError(error.message);
+  }, [currentSubject]);
+
   const handleNewSubject = async () => {
     const name = prompt('Enter subject name:');
     if (name) {
@@ -290,6 +330,7 @@ function App() {
               onToggle={handleToggle}
               onReset={handleReset}
               onNewSubject={handleNewSubject}
+              onSetTime={handleSetTime}
             />
             <TimerInfo
               subjects={subjects}
