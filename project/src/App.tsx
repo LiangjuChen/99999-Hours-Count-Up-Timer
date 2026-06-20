@@ -3,7 +3,7 @@ import { Timer } from './components/Timer';
 import { Controls } from './components/Controls';
 import { TimerInfo } from './components/TimerInfo';
 import { ThemeToggle } from './components/ThemeToggle';
-import { supabase } from './lib/supabase';
+import { isSupabaseConfigured, supabase } from './lib/supabase';
 import { TimerSubject } from './utils/timeUtils';
 
 function App() {
@@ -25,6 +25,12 @@ function App() {
   // Fetch from Supabase on mount, with localStorage migration
   useEffect(() => {
     async function loadSubjects() {
+      if (!isSupabaseConfigured) {
+        setError('Missing Supabase environment variables. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your deployment settings.');
+        setLoading(false);
+        return;
+      }
+
       try {
         const { data, error } = await supabase
           .from('timer_subjects')
