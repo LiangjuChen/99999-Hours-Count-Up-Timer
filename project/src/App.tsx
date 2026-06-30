@@ -4,7 +4,7 @@ import { Controls } from './components/Controls';
 import { TimerInfo } from './components/TimerInfo';
 import { ThemeToggle } from './components/ThemeToggle';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
-import { TimerSubject, formatTime, parseManualTime } from './utils/timeUtils';
+import { TimerSubject, formatTime, generateId, parseManualTime } from './utils/timeUtils';
 
 type TimerSubjectRow = {
   id: string;
@@ -14,7 +14,48 @@ type TimerSubjectRow = {
 };
 
 function getErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : 'Unknown error';
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object') {
+    const maybeMessage = 'message' in err ? err.message : undefined;
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
+
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return 'Unknown error';
+    }
+  }
+  return typeof err === 'string' && err.trim() ? err : 'Unknown error';
+}
+
+function createDefaultSubject(): TimerSubject {
+  return {
+    id: generateId(),
+    name: 'General',
+    seconds: 0,
+    isRunning: false,
+  };
+}
+
+function loadLocalSubjects(): TimerSubject[] {
+  try {
+    const stored = localStorage.getItem('timerSubjects');
+    if (!stored) return [createDefaultSubject()];
+
+    const parsed = JSON.parse(stored) as Partial<TimerSubject>[];
+    const subjects = parsed
+      .filter(subject => subject.name && typeof subject.seconds === 'number')
+      .map(subject => ({
+        id: subject.id || generateId(),
+        name: subject.name!,
+        seconds: Math.max(0, Math.floor(subject.seconds!)),
+        isRunning: Boolean(subject.isRunning),
+      }));
+
+    return subjects.length > 0 ? subjects : [createDefaultSubject()];
+  } catch {
+    return [createDefaultSubject()];
+  }
 }
 
 function App() {
@@ -29,7 +70,8 @@ function App() {
   const [subjects, setSubjects] = useState<TimerSubject[]>([]);
   const [currentSubjectId, setCurrentSubjectId] = useState<string>('');
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
+  const [cloudSyncEnabled, setCloudSyncEnabled] = useState(isSupabaseConfigured);
   const subjectsRef = useRef(subjects);
   subjectsRef.current = subjects;
 
@@ -37,7 +79,11 @@ function App() {
   useEffect(() => {
     async function loadSubjects() {
       if (!isSupabaseConfigured) {
-        setError('Missing Supabase environment variables. Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your deployment settings.');
+        const localSubjects = loadLocalSubjects();
+        setSubjects(localSubjects);
+        setCurrentSubjectId(localSubjects[0].id);
+        setCloudSyncEnabled(false);
+        setSyncWarning('Cloud sync is not configured. Using this browser only.');
         setLoading(false);
         return;
       }
@@ -114,7 +160,11 @@ function App() {
           setCurrentSubjectId(defaultSubject.id);
         }
       } catch (err) {
-        setError(getErrorMessage(err));
+        const localSubjects = loadLocalSubjects();
+        setSubjects(localSubjects);
+        setCurrentSubjectId(localSubjects[0].id);
+        setCloudSyncEnabled(false);
+        setSyncWarning(`Cloud sync is unavailable (${getErrorMessage(err)}). Using this browser only.`);
       } finally {
         setLoading(false);
       }
@@ -122,6 +172,12 @@ function App() {
 
     loadSubjects();
   }, []);
+
+  // Keep a local backup so the timer remains usable if cloud sync is unavailable.
+  useEffect(() => {
+    if (loading || subjects.length === 0) return;
+    localStorage.setItem('timerSubjects', JSON.stringify(subjects));
+  }, [loading, subjects]);
 
   // Timer tick every second
   useEffect(() => {
@@ -138,6 +194,8 @@ function App() {
 
   // Periodic sync to Supabase (every 5 seconds for running subjects)
   useEffect(() => {
+    if (!cloudSyncEnabled) return;
+
     const interval = setInterval(() => {
       const running = subjectsRef.current.filter(s => s.isRunning);
       if (running.length === 0) return;
@@ -148,11 +206,11 @@ function App() {
             .update({ seconds: s.seconds, is_running: s.isRunning })
             .eq('id', s.id)
         )
-      );
+      ).catch(err => setSyncWarning(`Cloud sync is unavailable (${getErrorMessage(err)}). Changes are saved in this browser.`));
     }, 5000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [cloudSyncEnabled]);
 
   // Theme
   useEffect(() => {
@@ -178,14 +236,14 @@ function App() {
       })
     );
 
-    if (updatedSubject) {
+    if (updatedSubject && cloudSyncEnabled) {
       const { error } = await supabase
         .from('timer_subjects')
         .update({ seconds: updatedSubject.seconds, is_running: updatedSubject.isRunning })
         .eq('id', currentSubjectId);
-      if (error) setError(error.message);
+      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
     }
-  }, [currentSubjectId]);
+  }, [cloudSyncEnabled, currentSubjectId]);
 
   const handleReset = useCallback(async () => {
     setSubjects(prev =>
@@ -194,12 +252,14 @@ function App() {
       )
     );
 
-    const { error } = await supabase
-      .from('timer_subjects')
-      .update({ seconds: 0, is_running: false })
-      .eq('id', currentSubjectId);
-    if (error) setError(error.message);
-  }, [currentSubjectId]);
+    if (cloudSyncEnabled) {
+      const { error } = await supabase
+        .from('timer_subjects')
+        .update({ seconds: 0, is_running: false })
+        .eq('id', currentSubjectId);
+      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
+    }
+  }, [cloudSyncEnabled, currentSubjectId]);
 
   const handleToggleRef = useRef(handleToggle);
   handleToggleRef.current = handleToggle;
@@ -245,37 +305,59 @@ function App() {
       )
     );
 
-    const { error } = await supabase
-      .from('timer_subjects')
-      .update({ seconds: nextSeconds })
-      .eq('id', currentSubject.id);
-    if (error) setError(error.message);
-  }, [currentSubject]);
+    if (cloudSyncEnabled) {
+      const { error } = await supabase
+        .from('timer_subjects')
+        .update({ seconds: nextSeconds })
+        .eq('id', currentSubject.id);
+      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
+    }
+  }, [cloudSyncEnabled, currentSubject]);
 
   const handleNewSubject = async () => {
     const name = prompt('Enter subject name:');
-    if (name) {
-      const { data, error } = await supabase
-        .from('timer_subjects')
-        .insert({ name, seconds: 0, is_running: false })
-        .select()
-        .single();
+    if (!name) return;
 
-      if (error) {
-        setError(error.message);
-        return;
-      }
-
-      const newSubject: TimerSubject = {
-        id: data.id,
-        name: data.name,
-        seconds: data.seconds,
-        isRunning: data.is_running,
+    if (!cloudSyncEnabled) {
+      const localSubject: TimerSubject = {
+        id: generateId(),
+        name,
+        seconds: 0,
+        isRunning: false,
       };
-
-      setSubjects(prev => [...prev, newSubject]);
-      setCurrentSubjectId(newSubject.id);
+      setSubjects(prev => [...prev, localSubject]);
+      setCurrentSubjectId(localSubject.id);
+      return;
     }
+
+    const { data, error } = await supabase
+      .from('timer_subjects')
+      .insert({ name, seconds: 0, is_running: false })
+      .select()
+      .single();
+
+    if (error) {
+      setSyncWarning(`Cloud sync is unavailable (${error.message}). New timer is saved in this browser.`);
+      const localSubject: TimerSubject = {
+        id: generateId(),
+        name,
+        seconds: 0,
+        isRunning: false,
+      };
+      setSubjects(prev => [...prev, localSubject]);
+      setCurrentSubjectId(localSubject.id);
+      return;
+    }
+
+    const newSubject: TimerSubject = {
+      id: data.id,
+      name: data.name,
+      seconds: data.seconds,
+      isRunning: data.is_running,
+    };
+
+    setSubjects(prev => [...prev, newSubject]);
+    setCurrentSubjectId(newSubject.id);
   };
 
   const handleDeleteSubject = async (subjectId: string) => {
@@ -285,10 +367,11 @@ function App() {
     }
 
     if (confirm('Are you sure you want to delete this subject?')) {
-      const { error } = await supabase.from('timer_subjects').delete().eq('id', subjectId);
-      if (error) {
-        setError(error.message);
-        return;
+      if (cloudSyncEnabled) {
+        const { error } = await supabase.from('timer_subjects').delete().eq('id', subjectId);
+        if (error) {
+          setSyncWarning(`Cloud sync is unavailable (${error.message}). Timer was removed from this browser only.`);
+        }
       }
 
       setSubjects(prev => prev.filter(s => s.id !== subjectId));
@@ -307,14 +390,6 @@ function App() {
     );
   }
 
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
-        <div className="text-red-500 text-lg">Error: {error}</div>
-      </div>
-    );
-  }
-
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900 transition-colors">
       <ThemeToggle isDark={isDark} onToggle={() => setIsDark(!isDark)} />
@@ -323,6 +398,11 @@ function App() {
           <h1 className="text-3xl font-bold mb-8 text-center text-gray-800 dark:text-gray-100">
             {currentSubject?.name || 'Timer'}
           </h1>
+          {syncWarning && (
+            <div className="mb-4 rounded-lg bg-amber-100 px-4 py-3 text-sm text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+              {syncWarning}
+            </div>
+          )}
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-8 text-center">
             <Timer subject={currentSubject} />
             <Controls
