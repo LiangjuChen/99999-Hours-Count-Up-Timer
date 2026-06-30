@@ -28,6 +28,15 @@ function getErrorMessage(err: unknown): string {
   return typeof err === 'string' && err.trim() ? err : 'Unknown error';
 }
 
+function getCloudSyncWarning(err: unknown, fallbackMessage: string): string {
+  const message = getErrorMessage(err);
+  const networkFailure = /load failed|failed to fetch|networkerror|network request failed/i.test(message);
+  const reason = networkFailure
+    ? 'Network request failed. Supabase may be unreachable from this network.'
+    : message;
+  return `Cloud sync is unavailable (${reason}). ${fallbackMessage}`;
+}
+
 function createDefaultSubject(): TimerSubject {
   return {
     id: generateId(),
@@ -164,7 +173,7 @@ function App() {
         setSubjects(localSubjects);
         setCurrentSubjectId(localSubjects[0].id);
         setCloudSyncEnabled(false);
-        setSyncWarning(`Cloud sync is unavailable (${getErrorMessage(err)}). Using this browser only.`);
+        setSyncWarning(getCloudSyncWarning(err, 'Using this browser only.'));
       } finally {
         setLoading(false);
       }
@@ -206,7 +215,7 @@ function App() {
             .update({ seconds: s.seconds, is_running: s.isRunning })
             .eq('id', s.id)
         )
-      ).catch(err => setSyncWarning(`Cloud sync is unavailable (${getErrorMessage(err)}). Changes are saved in this browser.`));
+      ).catch(err => setSyncWarning(getCloudSyncWarning(err, 'Changes are saved in this browser.')));
     }, 5000);
 
     return () => clearInterval(interval);
@@ -222,6 +231,120 @@ function App() {
       localStorage.setItem('theme', 'light');
     }
   }, [isDark]);
+
+  const handleRetryCloudSync = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      setSyncWarning('Cloud sync is not configured. Using this browser only.');
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('timer_subjects')
+        .select('*')
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+
+      const localSubjects = subjectsRef.current;
+      const cloudSubjects = data && data.length > 0
+        ? (data as TimerSubjectRow[]).map((s) => ({
+          id: s.id,
+          name: s.name,
+          seconds: s.seconds,
+          isRunning: s.is_running,
+        }))
+        : [];
+
+      if (cloudSubjects.length > 0) {
+        const mergedSubjects = cloudSubjects.map(cloudSubject => {
+          const localSubject = localSubjects.find(subject =>
+            subject.id === cloudSubject.id || subject.name === cloudSubject.name
+          );
+
+          if (!localSubject) return cloudSubject;
+
+          return {
+            ...cloudSubject,
+            name: localSubject.name || cloudSubject.name,
+            seconds: Math.max(cloudSubject.seconds, localSubject.seconds),
+            isRunning: localSubject.isRunning || cloudSubject.isRunning,
+          };
+        });
+
+        const localOnlySubjects = localSubjects.filter(localSubject =>
+          !cloudSubjects.some(cloudSubject =>
+            cloudSubject.id === localSubject.id || cloudSubject.name === localSubject.name
+          )
+        );
+
+        await Promise.all(
+          mergedSubjects.map(subject =>
+            supabase
+              .from('timer_subjects')
+              .update({
+                name: subject.name,
+                seconds: subject.seconds,
+                is_running: subject.isRunning,
+              })
+              .eq('id', subject.id)
+              .then(({ error }) => {
+                if (error) throw error;
+              })
+          )
+        );
+
+        let insertedSubjects: TimerSubject[] = [];
+        if (localOnlySubjects.length > 0) {
+          const { data: inserted, error: insertError } = await supabase
+            .from('timer_subjects')
+            .insert(localOnlySubjects.map(subject => ({
+              name: subject.name,
+              seconds: subject.seconds,
+              is_running: subject.isRunning,
+            })))
+            .select();
+          if (insertError) throw insertError;
+
+          insertedSubjects = (inserted as TimerSubjectRow[]).map((s) => ({
+            id: s.id,
+            name: s.name,
+            seconds: s.seconds,
+            isRunning: s.is_running,
+          }));
+        }
+
+        const nextSubjects = [...mergedSubjects, ...insertedSubjects];
+        setSubjects(nextSubjects);
+        setCurrentSubjectId(nextSubjects[0].id);
+      } else if (localSubjects.length > 0) {
+        const insertData = localSubjects.map(s => ({
+          name: s.name,
+          seconds: s.seconds,
+          is_running: s.isRunning,
+        }));
+        const { data: inserted, error: insertError } = await supabase
+          .from('timer_subjects')
+          .insert(insertData)
+          .select();
+        if (insertError) throw insertError;
+
+        const mapped = (inserted as TimerSubjectRow[]).map((s) => ({
+          id: s.id,
+          name: s.name,
+          seconds: s.seconds,
+          isRunning: s.is_running,
+        }));
+        setSubjects(mapped);
+        setCurrentSubjectId(mapped[0].id);
+      }
+
+      setCloudSyncEnabled(true);
+      setSyncWarning(null);
+    } catch (err) {
+      setCloudSyncEnabled(false);
+      setSyncWarning(getCloudSyncWarning(err, 'Still using this browser only.'));
+    }
+  }, []);
 
   const handleToggle = useCallback(async () => {
     let updatedSubject: TimerSubject | null = null;
@@ -241,7 +364,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: updatedSubject.seconds, is_running: updatedSubject.isRunning })
         .eq('id', currentSubjectId);
-      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
+      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
     }
   }, [cloudSyncEnabled, currentSubjectId]);
 
@@ -257,7 +380,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: 0, is_running: false })
         .eq('id', currentSubjectId);
-      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
+      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
     }
   }, [cloudSyncEnabled, currentSubjectId]);
 
@@ -310,7 +433,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: nextSeconds })
         .eq('id', currentSubject.id);
-      if (error) setSyncWarning(`Cloud sync is unavailable (${error.message}). Changes are saved in this browser.`);
+      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
     }
   }, [cloudSyncEnabled, currentSubject]);
 
@@ -337,7 +460,7 @@ function App() {
       .single();
 
     if (error) {
-      setSyncWarning(`Cloud sync is unavailable (${error.message}). New timer is saved in this browser.`);
+      setSyncWarning(getCloudSyncWarning(error, 'New timer is saved in this browser.'));
       const localSubject: TimerSubject = {
         id: generateId(),
         name,
@@ -370,7 +493,7 @@ function App() {
       if (cloudSyncEnabled) {
         const { error } = await supabase.from('timer_subjects').delete().eq('id', subjectId);
         if (error) {
-          setSyncWarning(`Cloud sync is unavailable (${error.message}). Timer was removed from this browser only.`);
+          setSyncWarning(getCloudSyncWarning(error, 'Timer was removed from this browser only.'));
         }
       }
 
@@ -399,8 +522,16 @@ function App() {
             {currentSubject?.name || 'Timer'}
           </h1>
           {syncWarning && (
-            <div className="mb-4 rounded-lg bg-amber-100 px-4 py-3 text-sm text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-              {syncWarning}
+            <div className="mb-4 flex flex-col gap-3 rounded-lg bg-amber-100 px-4 py-3 text-sm text-amber-800 dark:bg-amber-900/40 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between">
+              <span>{syncWarning}</span>
+              {isSupabaseConfigured && !cloudSyncEnabled && (
+                <button
+                  onClick={handleRetryCloudSync}
+                  className="rounded-md bg-amber-200 px-3 py-1 font-medium text-amber-900 transition-colors hover:bg-amber-300 dark:bg-amber-800 dark:text-amber-100 dark:hover:bg-amber-700"
+                >
+                  Retry cloud sync
+                </button>
+              )}
             </div>
           )}
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-8 text-center">
