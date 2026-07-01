@@ -13,6 +13,22 @@ type TimerSubjectRow = {
   is_running: boolean;
 };
 
+function readStorage(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures so the timer UI remains available.
+  }
+}
+
 function createDefaultSubject(): TimerSubject {
   return {
     id: generateId(),
@@ -24,7 +40,7 @@ function createDefaultSubject(): TimerSubject {
 
 function loadLocalSubjects(): TimerSubject[] {
   try {
-    const stored = localStorage.getItem('timerSubjects');
+    const stored = readStorage('timerSubjects');
     if (!stored) return [createDefaultSubject()];
 
     const parsed = JSON.parse(stored) as Partial<TimerSubject>[];
@@ -46,8 +62,8 @@ function loadLocalSubjects(): TimerSubject[] {
 function App() {
   const [isDark, setIsDark] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem('theme') === 'dark' ||
-        (!localStorage.getItem('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      return readStorage('theme') === 'dark' ||
+        (!readStorage('theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
     }
     return false;
   });
@@ -86,7 +102,7 @@ function App() {
             seconds: s.seconds,
             isRunning: s.is_running,
           }));
-          const hasLocalBackup = Boolean(localStorage.getItem('timerSubjects'));
+          const hasLocalBackup = Boolean(readStorage('timerSubjects'));
           const localSubjects = hasLocalBackup ? loadLocalSubjects() : [];
           const mergedSubjects = cloudSubjects.map(cloudSubject => {
             const localSubject = localSubjects.find(subject =>
@@ -138,8 +154,8 @@ function App() {
             .catch(() => setCloudSyncEnabled(false));
         } else {
           // Try to migrate from localStorage (old app data)
-          const oldData = localStorage.getItem('timerSubjects');
-          const migrated = localStorage.getItem('timerSubjects_migrated');
+          const oldData = readStorage('timerSubjects');
+          const migrated = readStorage('timerSubjects_migrated');
           if (oldData && !migrated) {
             try {
               const oldSubjects: TimerSubject[] = JSON.parse(oldData);
@@ -164,7 +180,7 @@ function App() {
                 }));
                 setSubjects(mapped);
                 setCurrentSubjectId(mapped[0].id);
-                localStorage.setItem('timerSubjects_migrated', 'true');
+                writeStorage('timerSubjects_migrated', 'true');
                 setLoading(false);
                 return;
               }
@@ -206,7 +222,7 @@ function App() {
   // Keep a local backup so the timer remains usable if cloud sync is unavailable.
   useEffect(() => {
     if (loading || subjects.length === 0) return;
-    localStorage.setItem('timerSubjects', JSON.stringify(subjects));
+    writeStorage('timerSubjects', JSON.stringify(subjects));
   }, [loading, subjects]);
 
   // Timer tick every second
@@ -250,10 +266,10 @@ function App() {
   useEffect(() => {
     if (isDark) {
       document.documentElement.classList.add('dark');
-      localStorage.setItem('theme', 'dark');
+      writeStorage('theme', 'dark');
     } else {
       document.documentElement.classList.remove('dark');
-      localStorage.setItem('theme', 'light');
+      writeStorage('theme', 'light');
     }
   }, [isDark]);
 
