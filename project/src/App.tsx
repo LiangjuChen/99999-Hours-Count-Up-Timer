@@ -13,30 +13,6 @@ type TimerSubjectRow = {
   is_running: boolean;
 };
 
-function getErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === 'object') {
-    const maybeMessage = 'message' in err ? err.message : undefined;
-    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
-
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return 'Unknown error';
-    }
-  }
-  return typeof err === 'string' && err.trim() ? err : 'Unknown error';
-}
-
-function getCloudSyncWarning(err: unknown, fallbackMessage: string): string {
-  const message = getErrorMessage(err);
-  const networkFailure = /load failed|failed to fetch|networkerror|network request failed/i.test(message);
-  const reason = networkFailure
-    ? 'Network request failed. Supabase may be unreachable from this network.'
-    : message;
-  return `Cloud sync is unavailable (${reason}). ${fallbackMessage}`;
-}
-
 function createDefaultSubject(): TimerSubject {
   return {
     id: generateId(),
@@ -79,7 +55,6 @@ function App() {
   const [subjects, setSubjects] = useState<TimerSubject[]>([]);
   const [currentSubjectId, setCurrentSubjectId] = useState<string>('');
   const [loading, setLoading] = useState(true);
-  const [syncWarning, setSyncWarning] = useState<string | null>(null);
   const [cloudSyncEnabled, setCloudSyncEnabled] = useState(isSupabaseConfigured);
   const subjectsRef = useRef(subjects);
   subjectsRef.current = subjects;
@@ -92,7 +67,6 @@ function App() {
         setSubjects(localSubjects);
         setCurrentSubjectId(localSubjects[0].id);
         setCloudSyncEnabled(false);
-        setSyncWarning('Cloud sync is not configured. Using this browser only.');
         setLoading(false);
         return;
       }
@@ -106,14 +80,62 @@ function App() {
         if (error) throw error;
 
         if (data && data.length > 0) {
-          const mapped = (data as TimerSubjectRow[]).map((s) => ({
+          const cloudSubjects = (data as TimerSubjectRow[]).map((s) => ({
             id: s.id,
             name: s.name,
             seconds: s.seconds,
             isRunning: s.is_running,
           }));
-          setSubjects(mapped);
-          setCurrentSubjectId(mapped[0].id);
+          const hasLocalBackup = Boolean(localStorage.getItem('timerSubjects'));
+          const localSubjects = hasLocalBackup ? loadLocalSubjects() : [];
+          const mergedSubjects = cloudSubjects.map(cloudSubject => {
+            const localSubject = localSubjects.find(subject =>
+              subject.id === cloudSubject.id || subject.name === cloudSubject.name
+            );
+
+            if (!localSubject) return cloudSubject;
+
+            return {
+              ...cloudSubject,
+              name: localSubject.name || cloudSubject.name,
+              seconds: Math.max(cloudSubject.seconds, localSubject.seconds),
+              isRunning: localSubject.isRunning || cloudSubject.isRunning,
+            };
+          });
+          const localOnlySubjects = localSubjects.filter(localSubject =>
+            !cloudSubjects.some(cloudSubject =>
+              cloudSubject.id === localSubject.id || cloudSubject.name === localSubject.name
+            )
+          );
+
+          setSubjects(mergedSubjects);
+          setCurrentSubjectId(mergedSubjects[0].id);
+
+          Promise.all([
+            ...mergedSubjects.map(subject =>
+              supabase
+                .from('timer_subjects')
+                .update({
+                  name: subject.name,
+                  seconds: subject.seconds,
+                  is_running: subject.isRunning,
+                })
+                .eq('id', subject.id)
+            ),
+            ...(localOnlySubjects.length > 0
+              ? [supabase
+                .from('timer_subjects')
+                .insert(localOnlySubjects.map(subject => ({
+                  name: subject.name,
+                  seconds: subject.seconds,
+                  is_running: subject.isRunning,
+                })))]
+              : []),
+          ])
+            .then(results => {
+              if (results.some(result => result.error)) setCloudSyncEnabled(false);
+            })
+            .catch(() => setCloudSyncEnabled(false));
         } else {
           // Try to migrate from localStorage (old app data)
           const oldData = localStorage.getItem('timerSubjects');
@@ -168,12 +190,11 @@ function App() {
           setSubjects([defaultSubject]);
           setCurrentSubjectId(defaultSubject.id);
         }
-      } catch (err) {
+      } catch {
         const localSubjects = loadLocalSubjects();
         setSubjects(localSubjects);
         setCurrentSubjectId(localSubjects[0].id);
         setCloudSyncEnabled(false);
-        setSyncWarning(getCloudSyncWarning(err, 'Using this browser only.'));
       } finally {
         setLoading(false);
       }
@@ -215,7 +236,11 @@ function App() {
             .update({ seconds: s.seconds, is_running: s.isRunning })
             .eq('id', s.id)
         )
-      ).catch(err => setSyncWarning(getCloudSyncWarning(err, 'Changes are saved in this browser.')));
+      )
+        .then(results => {
+          if (results.some(result => result.error)) setCloudSyncEnabled(false);
+        })
+        .catch(() => setCloudSyncEnabled(false));
     }, 5000);
 
     return () => clearInterval(interval);
@@ -364,7 +389,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: updatedSubject.seconds, is_running: updatedSubject.isRunning })
         .eq('id', currentSubjectId);
-      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
+      if (error) setCloudSyncEnabled(false);
     }
   }, [cloudSyncEnabled, currentSubjectId]);
 
@@ -380,7 +405,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: 0, is_running: false })
         .eq('id', currentSubjectId);
-      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
+      if (error) setCloudSyncEnabled(false);
     }
   }, [cloudSyncEnabled, currentSubjectId]);
 
@@ -433,7 +458,7 @@ function App() {
         .from('timer_subjects')
         .update({ seconds: nextSeconds })
         .eq('id', currentSubject.id);
-      if (error) setSyncWarning(getCloudSyncWarning(error, 'Changes are saved in this browser.'));
+      if (error) setCloudSyncEnabled(false);
     }
   }, [cloudSyncEnabled, currentSubject]);
 
@@ -460,7 +485,7 @@ function App() {
       .single();
 
     if (error) {
-      setSyncWarning(getCloudSyncWarning(error, 'New timer is saved in this browser.'));
+      setCloudSyncEnabled(false);
       const localSubject: TimerSubject = {
         id: generateId(),
         name,
@@ -493,7 +518,7 @@ function App() {
       if (cloudSyncEnabled) {
         const { error } = await supabase.from('timer_subjects').delete().eq('id', subjectId);
         if (error) {
-          setSyncWarning(getCloudSyncWarning(error, 'Timer was removed from this browser only.'));
+          setCloudSyncEnabled(false);
         }
       }
 
