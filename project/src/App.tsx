@@ -29,6 +29,15 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs = 5000): Promise<T> {
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise<T>((_, reject) => {
+      window.setTimeout(() => reject(new Error('Request timed out')), timeoutMs);
+    }),
+  ]);
+}
+
 function createDefaultSubject(): TimerSubject {
   return {
     id: generateId(),
@@ -88,10 +97,12 @@ function App() {
       }
 
       try {
-        const { data, error } = await supabase
-          .from('timer_subjects')
-          .select('*')
-          .order('created_at', { ascending: true });
+        const { data, error } = await withTimeout(
+          supabase
+            .from('timer_subjects')
+            .select('*')
+            .order('created_at', { ascending: true })
+        );
 
         if (error) throw error;
 
@@ -550,6 +561,14 @@ function App() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
         <div className="text-gray-600 dark:text-gray-300 text-lg">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!currentSubject) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <div className="text-gray-600 dark:text-gray-300 text-lg">Preparing timer...</div>
       </div>
     );
   }
