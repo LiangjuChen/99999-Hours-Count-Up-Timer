@@ -87,7 +87,8 @@ function App() {
   // Fetch from Supabase on mount, with localStorage migration
   useEffect(() => {
     async function loadSubjects() {
-      if (!isSupabaseConfigured) {
+      const forceLocalOnly = readStorage('forceLocalOnly') === 'true';
+      if (forceLocalOnly || !isSupabaseConfigured) {
         const localSubjects = loadLocalSubjects();
         setSubjects(localSubjects);
         setCurrentSubjectId(localSubjects[0].id);
